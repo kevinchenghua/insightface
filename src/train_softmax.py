@@ -34,6 +34,8 @@ import sklearn
 #sys.path.append(os.path.join(os.path.dirname(__file__), 'losses'))
 #import center_loss
 
+from mxboard import SummaryWriter
+
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -125,6 +127,7 @@ def parse_args():
   parser.add_argument('--cutoff', type=int, default=0, help='cut off aug')
   parser.add_argument('--target', type=str, default='lfw,cfp_fp,agedb_30', help='verification targets')
   parser.add_argument('--ce-loss', default=False, action='store_true', help='if output ce loss')
+  parser.add_argument('--log-board', type=int, default=0, help='whether to log variables to mxboard')
   args = parser.parse_args()
   return args
 
@@ -347,6 +350,13 @@ def train_net(args):
       _, arg_params, aux_params = mx.model.load_checkpoint(vec[0], int(vec[1]))
       sym, arg_params, aux_params = get_symbol(args, arg_params, aux_params)
 
+    if args.log_board:
+      log_dir = os.path.join(prefix_dir, 'logs')
+      if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+      sw = SummaryWriter(logdir=log_dir, flush_secs=5)
+      sw.add_graph(sym)
+
     #label_name = 'softmax_label'
     #label_shape = (args.batch_size,)
     model = mx.mod.Module(
@@ -435,6 +445,11 @@ def train_net(args):
       if mbatch%1000==0:
         print('lr-batch-epoch:',opt.lr,param.nbatch,param.epoch)
 
+      if mbatch>=0 and mbatch%(som*10)==0:
+        _, val_acc = metric1.get()
+        sw.add_scalar(tag='val_acc', value=val_acc, global_step=global_step[0])
+        sw.add_scalar(tag='lr', value=opt.lr, global_step=global_step[0])
+
       if mbatch>=0 and mbatch%args.verbose==0:
         acc_list = ver_test(mbatch)
         save_step[0]+=1
@@ -459,6 +474,9 @@ def train_net(args):
           arg, aux = model.get_params()
           mx.model.save_checkpoint(prefix, msave, model.symbol, arg, aux)
         print('[%d]Accuracy-Highest: %1.5f'%(mbatch, highest_acc[-1]))
+        if args.log_board:
+          for i in range(len(acc_list)):
+            sw.add_scalar(tag=ver_name_list[i]+'_acc', value=acc_list[i], global_step=global_step[0])
       if mbatch<=args.beta_freeze:
         _beta = args.beta
       else:

@@ -3,6 +3,7 @@ import argparse
 import cv2
 import numpy as np
 import datetime
+import mxnet as mx
 
 parser = argparse.ArgumentParser(description='face model test')
 # general
@@ -14,13 +15,19 @@ parser.add_argument('--flip', default=0, type=int, help='whether do lr flip aug'
 parser.add_argument('--threshold', default=1.24, type=float, help='ver dist threshold')
 args = parser.parse_args()
 
+num_run = 10
+
 model = face_embedding.FaceModel(args)
 #img = cv2.imread('/raid5data/dplearn/lfw/Jude_Law/Jude_Law_0001.jpg')
-img = cv2.imread('/raid5data/dplearn/megaface/facescrubr/112x112/Tom_Hanks/Tom_Hanks_54745.png')
+#img = cv2.imread('/raid5data/dplearn/megaface/facescrubr/112x112/Tom_Hanks/Tom_Hanks_54745.png')
+img = cv2.imread('Tom_Hanks_54745.png')
 
+mx.profiler.set_config(profile_symbolic=True, profile_memory=True, filename='profile_output.json')
+mx.profiler.set_state('run')
 time_now = datetime.datetime.now()
-for i in xrange(3000):
+for i in xrange(num_run):
   f1 = model.get_feature(img)
 time_now2 = datetime.datetime.now()
 diff = time_now2 - time_now
-print(diff.total_seconds()/3000)
+mx.profiler.set_state('stop')
+print(diff.total_seconds()/num_run)
