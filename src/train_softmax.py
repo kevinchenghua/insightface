@@ -56,6 +56,7 @@ class AccMetric(mx.metric.EvalMetric):
   def update(self, labels, preds):
     self.count+=1
     preds = [preds[1]] #use softmax output
+    labels = [labels[0]] #use id label
     for label, pred_label in zip(labels, preds):
         if pred_label.shape != label.shape:
             pred_label = mx.ndarray.argmax(pred_label, axis=self.axis)
@@ -67,6 +68,27 @@ class AccMetric(mx.metric.EvalMetric):
         assert label.shape==pred_label.shape
         self.sum_metric += (pred_label.flat == label.flat).sum()
         self.num_inst += len(pred_label.flat)
+
+class AgeLossValueMetric(mx.metric.EvalMetric):
+  def __init__(self, age_pred_idx=2, age_label_idx=1):
+    self.axis = 1
+    super(AgeLossValueMetric, self).__init__(
+        'age_loss', axis=self.axis,
+        output_names=None, label_names=None)
+    self.losses = []
+    self.age_pred_idx = age_pred_idx
+    self.age_label_idx = age_label_idx
+
+  def update(self, labels, preds):
+    preds = [preds[self.age_pred_idx]] #use age output
+    labels = [labels[self.age_label_idx]]
+    for label, pred_label in zip(labels, preds):
+        pred_label = pred_label.asnumpy().astype('float32').flatten()
+        label = label.asnumpy().astype('float32').flatten()
+        assert label.shape==pred_label.shape
+        self.sum_metric += np.linalg.norm(pred_label-label)
+        self.num_inst += len(pred_label.flat)
+
 
 class LossValueMetric(mx.metric.EvalMetric):
   def __init__(self):
@@ -128,6 +150,9 @@ def parse_args():
   parser.add_argument('--target', type=str, default='lfw,cfp_fp,agedb_30', help='verification targets')
   parser.add_argument('--ce-loss', default=False, action='store_true', help='if output ce loss')
   parser.add_argument('--log-board', type=int, default=0, help='whether to log variables to mxboard')
+  parser.add_argument('--train-data-name', type=str, default='train', help='whether to log variables to mxboard')
+  parser.add_argument('--decompose-age', type=bool, default=False, help='whether to use an additional channel to predict age')
+  parser.add_argument('--age-loss-weight', type=float, default=0.01, help='loss weight for age component')
   args = parser.parse_args()
   return args
 
@@ -136,6 +161,10 @@ def get_symbol(args, arg_params, aux_params):
   data_shape = (args.image_channel,args.image_h,args.image_w)
   image_shape = ",".join([str(x) for x in data_shape])
   margin_symbols = []
+
+  if args.decompose_age:
+    args.emb_size += 1
+
   if args.network[0]=='d':
     embedding = fdensenet.get_symbol(args.emb_size, args.num_layers,
         version_se=args.version_se, version_input=args.version_input, 
@@ -178,6 +207,12 @@ def get_symbol(args, arg_params, aux_params):
         version_se=args.version_se, version_input=args.version_input, 
         version_output=args.version_output, version_unit=args.version_unit,
         version_act=args.version_act)
+
+  if args.decompose_age:
+    age_component = mx.sym.slice_axis(embedding, axis=1, begin=-1, end=None)
+    embedding = mx.sym.slice_axis(embedding, axis=1, begin=0, end=-1)
+    args.emb_size -= 1
+
   all_label = mx.symbol.Variable('softmax_label')
   gt_label = all_label
   extra_loss = None
@@ -276,6 +311,10 @@ def get_symbol(args, arg_params, aux_params):
   out_list = [mx.symbol.BlockGrad(embedding)]
   softmax = mx.symbol.SoftmaxOutput(data=fc7, label = gt_label, name='softmax', normalization='valid')
   out_list.append(softmax)
+  if args.decompose_age:
+    age_label = mx.symbol.Variable('age_label')
+    age_output = mx.sym.LinearRegressionOutput(data=age_component, label=age_label, grad_scale=args.age_loss_weight, name='age')
+    out_list.append(age_output)
   if args.ce_loss:
     #ce_loss = mx.symbol.softmax_cross_entropy(data=fc7, label = gt_label, name='ce_loss')/args.per_batch_size
     body = mx.symbol.SoftmaxActivation(data=fc7)
@@ -326,7 +365,7 @@ def train_net(args):
     print('image_size', image_size)
     assert(args.num_classes>0)
     print('num_classes', args.num_classes)
-    path_imgrec = os.path.join(data_dir, "train.rec")
+    path_imgrec = os.path.join(data_dir, args.train_data_name+'.rec')
 
     if args.loss_type==1 and args.num_classes>20000:
       args.beta_freeze = 5000
@@ -359,10 +398,17 @@ def train_net(args):
 
     #label_name = 'softmax_label'
     #label_shape = (args.batch_size,)
-    model = mx.mod.Module(
+    if args.decompose_age:
+      model = mx.mod.Module(
         context       = ctx,
         symbol        = sym,
-    )
+        label_names   = ['softmax_label', 'age_label']
+      )
+    else:
+      model = mx.mod.Module(
+        context       = ctx,
+        symbol        = sym,
+      )
     val_dataiter = None
 
     train_dataiter = FaceImageIter(
@@ -373,6 +419,8 @@ def train_net(args):
         rand_mirror          = args.rand_mirror,
         mean                 = mean,
         cutoff               = args.cutoff,
+        decompose_age        = True,
+        age_label            = 'age_label',
     )
 
     metric1 = AccMetric()
@@ -380,6 +428,9 @@ def train_net(args):
     if args.ce_loss:
       metric2 = LossValueMetric()
       eval_metrics.append( mx.metric.create(metric2) )
+    if args.decompose_age:
+      metric3 = AgeLossValueMetric(age_pred_idx=2, age_label_idx=1)
+      eval_metrics.append( mx.metric.create(metric3) )
 
     if args.network[0]=='r' or args.network[0]=='y':
       initializer = mx.init.Xavier(rnd_type='gaussian', factor_type="out", magnitude=2) #resnet style
@@ -449,6 +500,9 @@ def train_net(args):
         _, val_acc = metric1.get()
         sw.add_scalar(tag='val_acc', value=val_acc, global_step=global_step[0])
         sw.add_scalar(tag='lr', value=opt.lr, global_step=global_step[0])
+        if args.decompose_age:
+          _, age_loss = metric3.get()
+          sw.add_scalar(tag='age_loss', value=age_loss, global_step=global_step[0])
 
       if mbatch>=0 and mbatch%args.verbose==0:
         acc_list = ver_test(mbatch)

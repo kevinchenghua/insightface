@@ -30,7 +30,8 @@ class FaceImageIter(io.DataIter):
                  path_imgrec = None,
                  shuffle=False, aug_list=None, mean = None,
                  rand_mirror = False, cutoff = 0,
-                 data_name='data', label_name='softmax_label', **kwargs):
+                 data_name='data', label_name='softmax_label',
+                 decompose_age=False, age_label='age_label', **kwargs):
         super(FaceImageIter, self).__init__()
         assert path_imgrec
         if path_imgrec:
@@ -83,6 +84,10 @@ class FaceImageIter(io.DataIter):
         self.cur = 0
         self.nbatch = 0
         self.is_init = False
+        # for age component training
+        self.decompose_age = decompose_age
+        if decompose_age:
+          self.provide_label.append((age_label, (batch_size,)))
 
 
     def reset(self):
@@ -110,6 +115,8 @@ class FaceImageIter(io.DataIter):
               s = self.imgrec.read_idx(idx)
               header, img = recordio.unpack(s)
               label = header.label
+              if self.decompose_age:
+                return label, img, None, None
               if not isinstance(label, numbers.Number):
                 label = label[0]
               return label, img, None, None
@@ -176,6 +183,8 @@ class FaceImageIter(io.DataIter):
         batch_data = nd.empty((batch_size, c, h, w))
         if self.provide_label is not None:
           batch_label = nd.empty(self.provide_label[0][1])
+          if self.decompose_age:
+            batch_age_label = nd.empty(self.provide_label[1][1])
         i = 0
         try:
             while i < batch_size:
@@ -213,13 +222,23 @@ class FaceImageIter(io.DataIter):
                     assert i < batch_size, 'Batch size must be multiples of augmenter output length'
                     #print(datum.shape)
                     batch_data[i][:] = self.postprocess_data(datum)
-                    batch_label[i][:] = label
+                    if self.decompose_age:
+                      batch_label[i][:] = label[0]
+                      batch_age_label[i][:] = label[1]
+                    else:
+                      batch_label[i][:] = label
                     i += 1
         except StopIteration:
             if i<batch_size:
                 raise StopIteration
-
-        return io.DataBatch([batch_data], [batch_label], batch_size - i)
+        if self.decompose_age:
+          provide_label = [
+            io.DataDesc(name=self.provide_label[0][0], shape=self.provide_label[0][1]),
+            io.DataDesc(name=self.provide_label[1][0], shape=self.provide_label[1][1])
+          ]
+          return io.DataBatch([batch_data], [batch_label, batch_age_label], batch_size - i, provide_label=provide_label)
+        else:
+          return io.DataBatch([batch_data], [batch_label], batch_size - i)
 
     def check_data_shape(self, data_shape):
         """Checks if the input data shape is valid"""
